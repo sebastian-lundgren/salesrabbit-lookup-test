@@ -31,32 +31,37 @@ function splitName(fullName) {
   };
 }
 
-function isLikelyName(text) {
-  const t = cleanText(text);
-  if (!t) return false;
-  if (/\d/.test(t)) return false;
-  if (t.length < 4 || t.length > 60) return false;
-  if (!/\s/.test(t)) return false;
+function normalizeForCompare(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/&aring;|å/g, "a")
+    .replace(/&oslash;|ø/g, "o")
+    .replace(/&aelig;|æ/g, "e")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-  const blocked = [
-    "Person",
-    "Bedrift",
-    "Steder",
-    "Kart",
-    "Mer info",
-    "Vis resultatet i kart",
-    "Kundeservice",
-    "Om oss",
-    "Cookies",
-    "Min side",
-    "App",
-    "Tjenester",
-    "Nyttige sider",
-  ];
+function scoreAddressMatch(listingText, street1, zip, city) {
+  const hay = normalizeForCompare(listingText);
+  let score = 0;
 
-  if (blocked.some(word => t.includes(word))) return false;
+  if (street1) {
+    const streetNorm = normalizeForCompare(street1);
+    const streetParts = streetNorm.split(" ").filter(Boolean);
+    if (hay.includes(streetNorm)) {
+      score += 10;
+    } else {
+      for (const part of streetParts) {
+        if (part.length >= 2 && hay.includes(part)) score += 2;
+      }
+    }
+  }
 
-  return /^[A-Za-zÆØÅæøå .'\-]+$/.test(t);
+  if (zip && hay.includes(normalizeForCompare(zip))) score += 4;
+  if (city && hay.includes(normalizeForCompare(city))) score += 3;
+
+  return score;
 }
 
 app.post("/lookup-1881", async (req, res) => {
@@ -76,51 +81,47 @@ app.post("/lookup-1881", async (req, res) => {
     const html = await response.text();
     const $ = cheerio.load(html);
 
-    let phone = cleanText($('a[href^="tel:"]').first().text());
+    const candidates = [];
 
-    if (!phone) {
-      const bodyText = cleanText($("body").text());
-      const phoneMatch = bodyText.match(/\b\d{3}\s?\d{2}\s?\d{3}\b|\b\d{8}\b/);
-      phone = phoneMatch ? phoneMatch[0] : "";
-    }
+    $(".listing--person").each((_, el) => {
+      const box = $(el);
 
-    let name = "";
+      const name =
+        cleanText(box.find('a[data-galog*="Tittel"]').first().text()) ||
+        cleanText(box.find("a").first().text());
 
-    const headingCandidates = [];
-    $("h1, h2, h3").each((_, el) => {
-      const t = cleanText($(el).text());
-      if (isLikelyName(t)) headingCandidates.push(t);
+      const phone =
+        cleanText(box.find(".button-call__number").first().text()) ||
+        cleanText(box.find('a[href^="tel:"]').first().text());
+
+      const addressText = cleanText(box.text());
+      const score = scoreAddressMatch(addressText, street1, zip, city);
+
+      if (name && phone) {
+        candidates.push({
+          name,
+          phone,
+          addressText,
+          score,
+        });
+      }
     });
 
-    if (headingCandidates.length > 0) {
-      name = headingCandidates[0];
-    }
+    candidates.sort((a, b) => b.score - a.score);
 
-    if (!name) {
-      const generalCandidates = [];
-      $("a, span, div").each((_, el) => {
-        const t = cleanText($(el).text());
-        if (isLikelyName(t)) generalCandidates.push(t);
-      });
+    const best = candidates[0];
 
-      const uniqueCandidates = [...new Set(generalCandidates)];
-      if (uniqueCandidates.length > 0) {
-        name = uniqueCandidates[0];
-      }
-    }
-
-    if (!name || !phone) {
-      return res.status(404).json({
+    if (!best || best.score < 8) {
+      return res.json({
         match: false,
         leadId,
         query,
         url,
-        foundName: name || null,
-        foundPhone: phone || null,
+        candidates: candidates.slice(0, 5),
       });
     }
 
-    const { firstName, lastName } = splitName(name);
+    const { firstName, lastName } = splitName(best.name);
 
     return res.json({
       match: true,
@@ -129,7 +130,7 @@ app.post("/lookup-1881", async (req, res) => {
       url,
       firstName,
       lastName,
-      phone: normalizePhone(phone),
+      phone: normalizePhone(best.phone),
     });
   } catch (error) {
     console.error("lookup error:", error);
