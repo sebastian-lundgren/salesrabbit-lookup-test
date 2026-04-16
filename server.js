@@ -447,13 +447,37 @@ async function collectPlaywrightKartCandidates(street1, zip, city) {
     const page = await context.newPage();
     await page.goto(kartUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
 
-    await Promise.race([
-      page.waitForSelector('a[href*="/person/"]', { timeout: 8000 }),
-      page.waitForSelector('a[href^="tel:"]', { timeout: 8000 }),
-      page.waitForSelector("#details_result_item", { timeout: 8000 }),
-      page.waitForSelector(".result-item-location", { timeout: 8000 }),
-      page.waitForTimeout(5000),
-    ]);
+    try {
+      await page.waitForFunction(
+        () => {
+          const selectors = [
+            "#details_result_item",
+            ".result-item-location",
+            ".result-item",
+            '[id*="details"]',
+            '[class*="details"]',
+          ];
+          const hasRelevantInContainer = selectors.some((selector) => {
+            const nodes = Array.from(document.querySelectorAll(selector));
+            return nodes.some(
+              (node) =>
+                !!node.querySelector('h4 a[href*="/person/"]') ||
+                !!node.querySelector('a[href^="tel:"]'),
+            );
+          });
+          if (hasRelevantInContainer) return true;
+          return (
+            !!document.querySelector('h4 a[href*="/person/"]') ||
+            !!document.querySelector('a[href^="tel:"]')
+          );
+        },
+        { timeout: 15000 },
+      );
+    } catch (waitError) {
+      console.error("playwright wait warning:", waitError.message);
+    }
+
+    await page.waitForTimeout(2000);
 
     const extracted = await page.evaluate(() => {
       const rows = [];
@@ -526,6 +550,14 @@ async function collectPlaywrightKartCandidates(street1, zip, city) {
 
   const deduped = dedupeCandidates(candidates);
   deduped.sort((a, b) => b.score - a.score);
+  console.log(
+    "playwright candidates extracted:",
+    deduped.length,
+    deduped.slice(0, 3).map((candidate) => ({
+      name: candidate.name,
+      phone: candidate.phone,
+    })),
+  );
   return deduped;
 }
 
